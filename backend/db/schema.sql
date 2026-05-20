@@ -152,8 +152,8 @@ INSERT INTO setores (nome, padrao, access_dashboard, create_sales, view_own_sale
 SELECT 'Comercial', true, true, true, true, true, true, true
 WHERE NOT EXISTS (SELECT 1 FROM setores WHERE nome='Comercial');
 
-INSERT INTO setores (nome, padrao, access_dashboard, create_sales, view_all_sales, view_documents, manage_conference, change_sale_status, view_audit)
-SELECT 'Administrativo', true, true, true, false, true, true, true, true, true
+INSERT INTO setores (nome, padrao, access_dashboard, view_all_sales, view_documents, manage_conference, change_sale_status, view_audit)
+SELECT 'Administrativo', true, true, true, true, true, true, true
 WHERE NOT EXISTS (SELECT 1 FROM setores WHERE nome='Administrativo');
 
 INSERT INTO setores (nome, padrao, access_dashboard, create_sales, view_own_sales, view_all_sales, view_documents, manage_conference, change_sale_status, manage_users, manage_permissions, delete_sales, view_audit, act_as_captador, act_as_consultor, act_as_fechador)
