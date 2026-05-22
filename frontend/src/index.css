@@ -288,3 +288,230 @@ label.full-width{grid-column:1/-1}
 
 /* ── MISC ── */
 .val-currency{color:var(--green);font-weight:600}
+
+/* ══════════════════════════════════════════
+   RESPONSIVO — MOBILE (até 768px)
+══════════════════════════════════════════ */
+@media (max-width: 768px) {
+
+  /* SIDEBAR vira menu hamburguer */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    z-index: 300;
+    width: 260px;
+  }
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 4px 0 30px rgba(0,0,0,0.5);
+  }
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 299;
+  }
+  .sidebar-overlay.open {
+    display: block;
+  }
+
+  /* APP SHELL */
+  .app-shell {
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* WORKSPACE ocupa tudo */
+  .workspace {
+    margin-left: 0 !important;
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* TOPBAR com botão hamburguer */
+  .topbar {
+    padding: 12px 16px;
+    flex-shrink: 0;
+    gap: 10px;
+  }
+  .topbar h2 { font-size: 16px; }
+  .topbar p { font-size: 11px; }
+  .topbar .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  /* HAMBURGUER BUTTON */
+  .hamburger-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px; height: 36px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  /* TAB PANEL */
+  .tab-panel {
+    padding: 14px 14px;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  /* FORMS */
+  .form-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .form-grid label.full-width,
+  .form-grid label.wide {
+    grid-column: span 1 !important;
+  }
+
+  /* LAYOUTS de 2 colunas viram 1 */
+  .users-layout,
+  .permissions-layout,
+  .conference-layout,
+  .activity-grid,
+  .dashboard-grid,
+  .content-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* MÉTRICAS */
+  .metrics-row {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 8px;
+  }
+  .metric-card { padding: 12px 14px; }
+  .metric-card strong { font-size: 22px; }
+
+  /* TABELA DOCUMENTOS — scroll horizontal */
+  .documents-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .document-row { min-width: 900px; }
+
+  /* DASHBOARD tabela */
+  .dashboard-sales-list { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .dashboard-sale-row { min-width: 1000px; }
+
+  /* SALE ITEM */
+  .sale-item {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .sale-item-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  /* BOTÕES */
+  .primary-button,
+  .secondary-button,
+  .danger-button {
+    padding: 10px 16px;
+    font-size: 14px;
+  }
+  .form-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .form-actions button {
+    flex: 1;
+    justify-content: center;
+    text-align: center;
+  }
+
+  /* UPLOAD */
+  .doc-upload-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* PAYMENT OPTIONS */
+  .payment-options { gap: 6px; }
+  .payment-option { font-size: 12px; padding: 6px 10px; }
+
+  /* SECTOR */
+  .sector-permission-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  /* PERMISSION GRID */
+  .permission-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* CHECKLIST */
+  .checklist-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* AUTH */
+  .auth-view {
+    flex-direction: column;
+  }
+  .auth-copy {
+    padding: 24px 20px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .auth-copy h1 { font-size: 20px; }
+  .auth-panel {
+    width: 100%;
+    padding: 24px 20px;
+  }
+
+  /* USER LIST */
+  .user-list { max-height: none; }
+  .activity-list { max-height: none; }
+  .audit-list { max-height: calc(100vh - 180px); }
+
+  /* ACTIVITY RANKING */
+  .activity-ranking-item {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .activity-chip { font-size: 10px; padding: 2px 6px; }
+
+  /* TOPBAR botões menores */
+  .compact-button { padding: 7px 12px; font-size: 12px; }
+
+  /* MODAIS em tela cheia no mobile */
+  .modal-overlay > div,
+  div[style*="maxWidth: 900"],
+  div[style*="maxWidth: 700"],
+  div[style*="maxWidth: 860"] {
+    max-width: 100% !important;
+    max-height: 95vh !important;
+    border-radius: 12px 12px 0 0 !important;
+    margin-top: auto !important;
+  }
+}
+
+/* TABLET (769px - 1024px) */
+@media (min-width: 769px) and (max-width: 1024px) {
+  :root { --sidebar-w: 200px; }
+
+  .form-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .metrics-row { grid-template-columns: repeat(2, 1fr); }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .users-layout { grid-template-columns: 280px 1fr; }
+  .permissions-layout { grid-template-columns: 300px 1fr; }
+  .topbar { padding: 14px 18px; }
+  .tab-panel { padding: 16px 18px; }
+
+  /* Hamburguer não aparece no tablet */
+  .hamburger-btn { display: none; }
+}
+
+/* DESKTOP — hamburguer não aparece */
+@media (min-width: 1025px) {
+  .hamburger-btn { display: none; }
+}
