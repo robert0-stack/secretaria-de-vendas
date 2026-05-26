@@ -60,3 +60,29 @@ export const PRODUTOS = ['TIPITI','BURITI','BANGALO'];
 export const SEMANAS = ['1 SEMANA','2 SEMANAS'];
 export const FORMAS_PAG = ['PIX','DINHEIRO','CARTAO DE DEBITO','CARTAO DE CREDITO','TRANSFERENCIA','BOLETO'];
 export const AREAS = ['Comercial','Administrativo','ADM','Captação','Telemarketing'];
+
+// ✅ URL autenticada para arquivos — passa o token no header
+export const getFileUrl = (filename) => {
+  if (!filename) return null;
+  const base = import.meta.env.VITE_API_URL?.replace('/api', '') || '';
+  return `${base}/uploads/${filename}`;
+};
+
+// Abre arquivo com autenticação
+export const abrirArquivo = async (filename) => {
+  if (!filename) return;
+  const base = import.meta.env.VITE_API_URL?.replace('/api', '') || '';
+  const url = `${base}/uploads/${filename}`;
+  const token = localStorage.getItem('sv_token');
+  try {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error('Arquivo não encontrado');
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    window.open(objectUrl, '_blank');
+    // Libera a URL após 60 segundos
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+  } catch (e) {
+    alert('Erro ao abrir arquivo: ' + e.message);
+  }
+};

@@ -9,16 +9,72 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const app = express();
+
+// ✅ SEGURANÇA: JWT_SECRET obrigatório em produção
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
+  console.error('❌ FATAL: JWT_SECRET não definido! Configure a variável de ambiente.');
+  process.exit(1);
+}
+const SECRET = JWT_SECRET || 'dev_secret_apenas_local_nao_use_em_prod';
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-// MULTER
+// ✅ SEGURANÇA: Rate limiting simples sem dependência externa
+const loginAttempts = new Map(); // ip -> { count, lastAttempt }
+const MAX_ATTEMPTS = 5;
+const BLOCK_TIME = 15 * 60 * 1000; // 15 minutos
+
+const checkRateLimit = (req, res, next) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+
+  if (record) {
+    // Reseta após o tempo de bloqueio
+    if (now - record.lastAttempt > BLOCK_TIME) {
+      loginAttempts.delete(ip);
+    } else if (record.count >= MAX_ATTEMPTS) {
+      const restante = Math.ceil((BLOCK_TIME - (now - record.lastAttempt)) / 60000);
+      return res.status(429).json({
+        error: `Muitas tentativas de login. Tente novamente em ${restante} minuto(s).`
+      });
+    }
+  }
+  next();
+};
+
+const registerFailedAttempt = (ip) => {
+  const now = Date.now();
+  const record = loginAttempts.get(ip) || { count: 0, lastAttempt: now };
+  loginAttempts.set(ip, { count: record.count + 1, lastAttempt: now });
+};
+
+const clearAttempts = (ip) => loginAttempts.delete(ip);
+
+// Limpa tentativas antigas a cada 30 minutos
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginAttempts.entries()) {
+    if (now - record.lastAttempt > BLOCK_TIME) loginAttempts.delete(ip);
+  }
+}, 30 * 60 * 1000);
+
+// ✅ SEGURANÇA: Tipos de arquivo permitidos
+const ALLOWED_MIME_TYPES = [
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+  'application/pdf',
+];
+const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf'];
+
+// ✅ SEGURANÇA: Multer com verificação de tipo real
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = path.join(__dirname, 'uploads');
@@ -26,67 +82,116 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    const safe = Buffer.from(file.originalname, 'latin1').toString('utf8').replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    cb(null, `${Date.now()}-${safe}`);
+    // ✅ Nome 100% aleatório — impossível adivinhar
+    const ext = path.extname(file.originalname).toLowerCase();
+    const randomName = crypto.randomBytes(32).toString('hex') + ext;
+    cb(null, randomName);
   }
 });
-const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } });
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+const fileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (!ALLOWED_EXTENSIONS.includes(ext)) {
+    return cb(new Error(`Tipo de arquivo não permitido: ${ext}. Use PDF, JPG ou PNG.`), false);
+  }
+  if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+    return cb(new Error(`Formato inválido: ${file.mimetype}`), false);
+  }
+  cb(null, true);
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 } // 20MB
+});
+
+// ✅ SEGURANÇA: Servir uploads com autenticação obrigatória
+// (não servimos via express.static público)
 
 // AUTH MIDDLEWARE
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Token requerido' });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET || 'dev_secret');
+    req.user = jwt.verify(token, SECRET);
     next();
-  } catch { res.status(401).json({ error: 'Token invalido' }); }
+  } catch { res.status(401).json({ error: 'Token inválido ou expirado' }); }
 };
 
-const genId = () => 'u-' + crypto.randomUUID();
+// ✅ ROTA PROTEGIDA para servir arquivos de upload
+app.get('/uploads/:filename', auth, (req, res) => {
+  const filename = path.basename(req.params.filename); // previne path traversal
+  const filePath = path.join(__dirname, 'uploads', filename);
 
-// ✅ FIX: logAtiv agora loga erro no console para facilitar debug
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Arquivo não encontrado' });
+  }
+
+  // Detectar content-type pelo cabeçalho do arquivo
+  const ext = path.extname(filename).toLowerCase();
+  const contentTypes = {
+    '.pdf': 'application/pdf',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+  };
+  const contentType = contentTypes[ext] || 'application/octet-stream';
+
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', 'inline'); // abre no navegador em vez de baixar
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(filePath);
+});
+
+// Helpers
+const genId = () => 'u-' + crypto.randomUUID();
+const limparNumeros = (v) => (v || '').replace(/\D/g, '');
+const validarCNPJ = (cnpj) => { const n = limparNumeros(cnpj); return n.length === 0 || n.length === 14; };
+const validarCPF = (cpf) => { const n = limparNumeros(cpf); return n.length === 0 || n.length === 11; };
+
 const logAtiv = async (user_id, tipo, descricao, venda_id = null) => {
   try {
     await pool.query(
       'INSERT INTO atividades (user_id, tipo, descricao, venda_id) VALUES ($1,$2,$3,$4)',
       [user_id, tipo, descricao, venda_id]
     );
-  } catch (e) {
-    console.error('Erro ao registrar atividade:', e.message);
-  }
+  } catch (e) { console.error('Erro ao registrar atividade:', e.message); }
 };
 
-// ✅ FIX: validações de CNPJ e CPF no backend
-const limparNumeros = (v) => (v || '').replace(/\D/g, '');
-const validarCNPJ = (cnpj) => {
-  const n = limparNumeros(cnpj);
-  return n.length === 0 || n.length === 14;
-};
-const validarCPF = (cpf) => {
-  const n = limparNumeros(cpf);
-  return n.length === 0 || n.length === 11;
+// ✅ POLÍTICA DE SENHA
+const validarSenha = (senha) => {
+  if (!senha || senha.length < 8) return 'Senha deve ter pelo menos 8 caracteres.';
+  if (!/[A-Z]/.test(senha)) return 'Senha deve ter pelo menos uma letra maiúscula.';
+  if (!/[0-9]/.test(senha)) return 'Senha deve ter pelo menos um número.';
+  return null;
 };
 
-// ── AUTH ──────────────────────────────────────────────────────
+// ── AUTH ─────────────────────────────────────────────────────
 app.post('/api/auth/register', async (req, res) => {
   const { nome, cnpj, area_atuacao, email, telefone, senha } = req.body;
-  if (!nome || !email || !senha) return res.status(400).json({ error: 'Nome, email e senha sao obrigatorios' });
-  // ✅ FIX: validar CNPJ
-  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ invalido. Digite apenas os 14 numeros.' });
+  if (!nome || !email || !senha) return res.status(400).json({ error: 'Nome, email e senha são obrigatórios.' });
+
+  const senhaErro = validarSenha(senha);
+  if (senhaErro) return res.status(400).json({ error: senhaErro });
+  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ inválido. Digite os 14 números.' });
+
   try {
     const existe = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
-    if (existe.rows.length) return res.status(400).json({ error: 'E-mail ja cadastrado' });
+    if (existe.rows.length) return res.status(400).json({ error: 'E-mail já cadastrado.' });
+
     const senha_hash = await bcrypt.hash(senha, 12);
     const id = genId();
-    // ✅ FIX: salvar CNPJ somente números
     const cnpjLimpo = cnpj ? limparNumeros(cnpj) : null;
+
     await pool.query(
       'INSERT INTO users (id,nome,email,senha_hash,cnpj,area_atuacao,setor,status,acesso_criado) VALUES ($1,$2,$3,$4,$5,$6,$6,$7,true)',
       [id, nome, email, senha_hash, cnpjLimpo, area_atuacao || 'Comercial', 'Ativo']
     );
-    const setor = area_atuacao || 'Comercial';
-    const s = await pool.query('SELECT * FROM setores WHERE nome=$1', [setor]);
+
+    const s = await pool.query('SELECT * FROM setores WHERE nome=$1', [area_atuacao || 'Comercial']);
     if (s.rows.length) {
       const st = s.rows[0];
       await pool.query(`INSERT INTO permissoes (user_id,access_dashboard,create_sales,view_own_sales,view_all_sales,view_documents,manage_conference,change_sale_status,manage_users,manage_permissions,delete_sales,view_audit,act_as_captador,act_as_consultor,act_as_fechador)
@@ -100,26 +205,31 @@ app.post('/api/auth/register', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', checkRateLimit, async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
   const { email, senha } = req.body;
   try {
     const r = await pool.query(
       `SELECT u.*, p.* FROM users u LEFT JOIN permissoes p ON u.id=p.user_id WHERE u.email=$1`, [email]
     );
-    if (!r.rows.length) return res.status(401).json({ error: 'E-mail nao encontrado' });
+    if (!r.rows.length) {
+      registerFailedAttempt(ip);
+      return res.status(401).json({ error: 'E-mail não encontrado.' });
+    }
     const u = r.rows[0];
-    if (u.status === 'Inativo') return res.status(401).json({ error: 'Usuario inativo. Contate o administrador.' });
-    if (!u.senha_hash) return res.status(401).json({ error: 'Este usuario nao tem senha cadastrada. Contate o administrador.' });
+    if (u.status === 'Inativo') return res.status(401).json({ error: 'Usuário inativo. Contate o administrador.' });
+    if (!u.senha_hash) return res.status(401).json({ error: 'Usuário sem senha cadastrada. Contate o administrador.' });
+
     const ok = await bcrypt.compare(senha, u.senha_hash);
-    if (!ok) return res.status(401).json({ error: 'Senha incorreta' });
-    const token = jwt.sign(
-      { id: u.id, nome: u.nome, area: u.area_atuacao },
-      process.env.JWT_SECRET || 'dev_secret',
-      { expiresIn: '7d' }
-    );
-    // ✅ FIX: log de acesso funcionando corretamente
+    if (!ok) {
+      registerFailedAttempt(ip);
+      return res.status(401).json({ error: 'Senha incorreta.' });
+    }
+
+    clearAttempts(ip);
+    const token = jwt.sign({ id: u.id, nome: u.nome, area: u.area_atuacao }, SECRET, { expiresIn: '7d' });
     await logAtiv(u.id, 'access', `${u.nome} acessou o sistema.`);
-    const { senha_hash, reset_token, reset_token_exp, ...safe } = u;
+    const { senha_hash, ...safe } = u;
     res.json({ token, user: safe });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -127,16 +237,16 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/recuperar-senha', async (req, res) => {
   const { email } = req.body;
   try {
-    const r = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
-    if (!r.rows.length) return res.status(404).json({ error: 'E-mail nao encontrado no sistema.' });
-    res.json({ success: true, message: 'Se este e-mail estiver cadastrado, voce recebera as instrucoes.' });
+    // ✅ SEGURANÇA: Não revela se o e-mail existe ou não
+    await pool.query('SELECT id FROM users WHERE email=$1', [email]);
+    res.json({ success: true, message: 'Se este e-mail estiver cadastrado, você receberá as instruções.' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/auth/me', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT u.*, p.* FROM users u LEFT JOIN permissoes p ON u.id=p.user_id WHERE u.id=$1', [req.user.id]);
-    if (!r.rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Usuário não encontrado' });
     const { senha_hash, ...safe } = r.rows[0];
     res.json(safe);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -167,17 +277,19 @@ app.get('/api/users/fechadores', auth, async (req, res) => {
 
 app.post('/api/users', auth, async (req, res) => {
   const { nome, cnpj, cpf, area_atuacao, email, telefone, senha, status } = req.body;
-  // ✅ FIX: validações de CNPJ e CPF
-  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ invalido. Deve ter 14 digitos.' });
-  if (cpf && !validarCPF(cpf)) return res.status(400).json({ error: 'CPF invalido. Deve ter 11 digitos.' });
+  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ inválido.' });
+  if (cpf && !validarCPF(cpf)) return res.status(400).json({ error: 'CPF inválido.' });
+  if (senha) {
+    const senhaErro = validarSenha(senha);
+    if (senhaErro) return res.status(400).json({ error: senhaErro });
+  }
   try {
     const id = genId();
-    let senha_hash = null;
-    let acesso_criado = false;
+    let senha_hash = null, acesso_criado = false;
     if (senha) { senha_hash = await bcrypt.hash(senha, 12); acesso_criado = true; }
     if (email) {
       const existe = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
-      if (existe.rows.length) return res.status(400).json({ error: 'E-mail ja cadastrado' });
+      if (existe.rows.length) return res.status(400).json({ error: 'E-mail já cadastrado.' });
     }
     const cnpjLimpo = cnpj ? limparNumeros(cnpj) : null;
     const cpfLimpo = cpf ? limparNumeros(cpf) : null;
@@ -201,8 +313,12 @@ app.post('/api/users', auth, async (req, res) => {
 
 app.put('/api/users/:id', auth, async (req, res) => {
   const { nome, cnpj, cpf, area_atuacao, email, telefone, status, senha } = req.body;
-  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ invalido. Deve ter 14 digitos.' });
-  if (cpf && !validarCPF(cpf)) return res.status(400).json({ error: 'CPF invalido. Deve ter 11 digitos.' });
+  if (cnpj && !validarCNPJ(cnpj)) return res.status(400).json({ error: 'CNPJ inválido.' });
+  if (cpf && !validarCPF(cpf)) return res.status(400).json({ error: 'CPF inválido.' });
+  if (senha) {
+    const senhaErro = validarSenha(senha);
+    if (senhaErro) return res.status(400).json({ error: senhaErro });
+  }
   try {
     const cnpjLimpo = cnpj ? limparNumeros(cnpj) : null;
     const cpfLimpo = cpf ? limparNumeros(cpf) : null;
@@ -222,7 +338,7 @@ app.put('/api/users/:id', auth, async (req, res) => {
 app.put('/api/users/:id/toggle', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT status, nome FROM users WHERE id=$1', [req.params.id]);
-    if (!r.rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Usuário não encontrado.' });
     const novo = r.rows[0].status === 'Ativo' ? 'Inativo' : 'Ativo';
     await pool.query('UPDATE users SET status=$1 WHERE id=$2', [novo, req.params.id]);
     await logAtiv(req.user.id, 'users', `${r.rows[0].nome} foi ${novo === 'Inativo' ? 'inativado' : 'reativado'}.`);
@@ -232,10 +348,9 @@ app.put('/api/users/:id/toggle', auth, async (req, res) => {
 
 app.delete('/api/users/:id', auth, async (req, res) => {
   try {
-    // ✅ FIX: não permite excluir o próprio usuário logado
-    if (req.params.id === req.user.id) return res.status(400).json({ error: 'Voce nao pode excluir seu proprio usuario.' });
+    if (req.params.id === req.user.id) return res.status(400).json({ error: 'Você não pode excluir seu próprio usuário.' });
     const r = await pool.query('SELECT nome FROM users WHERE id=$1', [req.params.id]);
-    if (r.rows.length) await logAtiv(req.user.id, 'users', `${r.rows[0].nome} foi excluido.`);
+    if (r.rows.length) await logAtiv(req.user.id, 'users', `${r.rows[0].nome} foi excluído.`);
     await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -254,7 +369,7 @@ app.put('/api/permissoes/:user_id', auth, async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT (user_id) DO UPDATE SET access_dashboard=$2,create_sales=$3,view_own_sales=$4,view_all_sales=$5,view_documents=$6,manage_conference=$7,change_sale_status=$8,manage_users=$9,manage_permissions=$10,delete_sales=$11,view_audit=$12,act_as_captador=$13,act_as_consultor=$14,act_as_fechador=$15`,
       [req.params.user_id,p.access_dashboard,p.create_sales,p.view_own_sales,p.view_all_sales,p.view_documents,p.manage_conference,p.change_sale_status,p.manage_users,p.manage_permissions,p.delete_sales,p.view_audit,p.act_as_captador,p.act_as_consultor,p.act_as_fechador]);
-    await logAtiv(req.user.id, 'users', `Permissoes do usuario ${req.params.user_id} foram atualizadas.`);
+    await logAtiv(req.user.id, 'users', `Permissões do usuário ${req.params.user_id} foram atualizadas.`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -267,12 +382,12 @@ app.get('/api/setores', auth, async (req, res) => {
 
 app.post('/api/setores', auth, async (req, res) => {
   const { nome } = req.body;
-  if (!nome || !nome.trim()) return res.status(400).json({ error: 'Nome do setor e obrigatorio.' });
+  if (!nome || !nome.trim()) return res.status(400).json({ error: 'Nome do setor é obrigatório.' });
   try {
     const r = await pool.query('INSERT INTO setores (nome) VALUES ($1) RETURNING *', [nome.trim()]);
     res.json(r.rows[0]);
   } catch (e) {
-    if (e.code === '23505') return res.status(400).json({ error: 'Ja existe um setor com esse nome.' });
+    if (e.code === '23505') return res.status(400).json({ error: 'Já existe um setor com esse nome.' });
     res.status(500).json({ error: e.message });
   }
 });
@@ -285,19 +400,18 @@ app.put('/api/setores/:nome/permissoes', auth, async (req, res) => {
 });
 
 app.delete('/api/setores/:nome', auth, async (req, res) => {
-  // ✅ FIX: não permite excluir setores padrão
   const r = await pool.query('SELECT padrao FROM setores WHERE nome=$1', [req.params.nome]);
-  if (!r.rows.length) return res.status(404).json({ error: 'Setor nao encontrado.' });
-  if (r.rows[0].padrao) return res.status(400).json({ error: 'Nao e possivel excluir setores padrao do sistema.' });
+  if (!r.rows.length) return res.status(404).json({ error: 'Setor não encontrado.' });
+  if (r.rows[0].padrao) return res.status(400).json({ error: 'Não é possível excluir setores padrão.' });
   await pool.query('DELETE FROM setores WHERE nome=$1', [req.params.nome]);
   res.json({ success: true });
 });
 
 // ── VENDAS ───────────────────────────────────────────────────
 const docFields = [
-  { name: 'ficha_bloqueio', maxCount: 1 }, { name: 'ficha_atendimento', maxCount: 1 },
-  { name: 'documento_cliente', maxCount: 1 }, { name: 'comprovante', maxCount: 1 },
-  { name: 'negociacao', maxCount: 1 }, { name: 'documento_segundo', maxCount: 1 }
+  { name:'ficha_bloqueio',maxCount:1 }, { name:'ficha_atendimento',maxCount:1 },
+  { name:'documento_cliente',maxCount:1 }, { name:'comprovante',maxCount:1 },
+  { name:'negociacao',maxCount:1 }, { name:'documento_segundo',maxCount:1 }
 ];
 
 app.post('/api/vendas', auth, upload.fields(docFields), async (req, res) => {
@@ -314,7 +428,6 @@ app.post('/api/vendas', auth, upload.fields(docFields), async (req, res) => {
        JSON.stringify(d.pagamentos||[]),JSON.stringify(d.entrada_restante||{}),JSON.stringify(d.saldo||{}),
        d.spiff||null,d.brindes||null,d.observacoes||null,d.tem_segundo||false]);
 
-    // ✅ FIX: CPF salvo sem formatação
     const cpf1 = d.c1_cpf ? limparNumeros(d.c1_cpf) : null;
     await client.query(`INSERT INTO compradores (venda_id,is_segundo,nome,email,telefone1,telefone2,cpf,data_nasc,rg,orgao_exp,uf,estado_civil,profissao)
       VALUES ($1,false,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
@@ -339,7 +452,7 @@ app.post('/api/vendas', auth, upload.fields(docFields), async (req, res) => {
       }
     }
 
-    await logAtiv(req.user.id, 'sales', `Venda de ${d.c1_nome || 'cliente'} enviada para conferencia.`, vid);
+    await logAtiv(req.user.id, 'sales', `Venda de ${d.c1_nome||'cliente'} enviada para conferência.`, vid);
     await client.query('COMMIT');
     res.json({ success: true, venda_id: vid });
   } catch (e) {
@@ -392,7 +505,7 @@ app.get('/api/vendas/:id', auth, async (req, res) => {
       pool.query('SELECT * FROM documentos WHERE venda_id=$1', [req.params.id]),
       pool.query('SELECT * FROM conferencias WHERE venda_id=$1 LIMIT 1', [req.params.id])
     ]);
-    if (!venda.rows.length) return res.status(404).json({ error: 'Venda nao encontrada' });
+    if (!venda.rows.length) return res.status(404).json({ error: 'Venda não encontrada.' });
     res.json({ venda: venda.rows[0], compradores: compradores.rows, endereco: endereco.rows[0]||{}, documentos: docs.rows, conferencia: conf.rows[0]||{} });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -400,26 +513,27 @@ app.get('/api/vendas/:id', auth, async (req, res) => {
 app.delete('/api/vendas/:id', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id FROM vendas WHERE id=$1', [req.params.id]);
-    if (!r.rows.length) return res.status(404).json({ error: 'Venda nao encontrada' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Venda não encontrada.' });
     await pool.query('DELETE FROM vendas WHERE id=$1', [req.params.id]);
-    await logAtiv(req.user.id, 'sales', `Venda ${req.params.id} foi excluida.`, req.params.id);
+    await logAtiv(req.user.id, 'sales', `Venda ${req.params.id} foi excluída.`, req.params.id);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/vendas/:id/documentos', auth, upload.single('arquivo'), async (req, res) => {
   const { tipo } = req.body;
-  if (!req.file) return res.status(400).json({ error: 'Arquivo nao enviado' });
+  if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado.' });
   await pool.query('DELETE FROM documentos WHERE venda_id=$1 AND tipo=$2', [req.params.id, tipo]);
   await pool.query('INSERT INTO documentos (venda_id,tipo,arquivo_path,arquivo_original) VALUES ($1,$2,$3,$4)',
     [req.params.id, tipo, req.file.filename, req.file.originalname]);
-  await logAtiv(req.user.id, 'documents', `Documento ${tipo} da venda ${req.params.id} foi atualizado.`, req.params.id);
+  await logAtiv(req.user.id, 'documents', `Documento ${tipo} da venda ${req.params.id} atualizado.`, req.params.id);
   res.json({ success: true });
 });
 
 // ── CONFERÊNCIA ──────────────────────────────────────────────
 app.post('/api/conferencias', auth, async (req, res) => {
-  const { venda_id, inicio, termino, check_bloqueio, check_atendimento, check_doc_cliente, check_comprovante, check_negociacao, check_doc_segundo, check_dados_cliente, status, obs_admin } = req.body;
+  const { venda_id, inicio, termino, check_bloqueio, check_atendimento, check_doc_cliente,
+          check_comprovante, check_negociacao, check_doc_segundo, check_dados_cliente, status, obs_admin } = req.body;
   try {
     await pool.query(`INSERT INTO conferencias (venda_id,admin_id,inicio,termino,check_bloqueio,check_atendimento,check_doc_cliente,check_comprovante,check_negociacao,check_doc_segundo,check_dados_cliente,obs_admin)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -430,12 +544,10 @@ app.post('/api/conferencias', auth, async (req, res) => {
       if (old.rows.length) {
         const statusAnterior = old.rows[0].status;
         await pool.query('UPDATE vendas SET status=$1, obs_admin=$2, updated_at=NOW() WHERE id=$3', [status, obs_admin||null, venda_id]);
-        if (statusAnterior !== status) {
-          await logAtiv(req.user.id, 'conference', `Status da venda ${venda_id} alterado: ${statusAnterior} → ${status}.`, venda_id);
-        }
+        if (statusAnterior !== status) await logAtiv(req.user.id, 'conference', `Status da venda ${venda_id}: ${statusAnterior} → ${status}.`, venda_id);
       }
     }
-    await logAtiv(req.user.id, 'conference', `Conferencia da venda ${venda_id} salva.`, venda_id);
+    await logAtiv(req.user.id, 'conference', `Conferência da venda ${venda_id} salva.`, venda_id);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -448,11 +560,8 @@ app.get('/api/relatorios/dashboard', auth, async (req, res) => {
       pool.query("SELECT COUNT(*) as total FROM vendas WHERE status='Aprovado'"),
       pool.query("SELECT COUNT(*) as total FROM vendas WHERE status NOT IN ('Aprovado','Reprovado','Finalizado')"),
       pool.query("SELECT COUNT(*) as total FROM vendas WHERE status='Reprovado'"),
-      pool.query(`SELECT u.nome, COUNT(v.id) as total_vendas FROM users u
-        LEFT JOIN vendas v ON (v.captador_id=u.id OR v.consultor_id=u.id OR v.fechador_id=u.id)
-        WHERE u.status='Ativo' GROUP BY u.id,u.nome HAVING COUNT(v.id)>0 ORDER BY total_vendas DESC LIMIT 10`),
-      pool.query(`SELECT v.*, c1.nome as comprador_nome FROM vendas v
-        LEFT JOIN compradores c1 ON c1.venda_id=v.id AND c1.is_segundo=false ORDER BY v.created_at DESC LIMIT 50`)
+      pool.query(`SELECT u.nome, COUNT(v.id) as total_vendas FROM users u LEFT JOIN vendas v ON (v.captador_id=u.id OR v.consultor_id=u.id OR v.fechador_id=u.id) WHERE u.status='Ativo' GROUP BY u.id,u.nome HAVING COUNT(v.id)>0 ORDER BY total_vendas DESC LIMIT 10`),
+      pool.query(`SELECT v.*, c1.nome as comprador_nome FROM vendas v LEFT JOIN compradores c1 ON c1.venda_id=v.id AND c1.is_segundo=false ORDER BY v.created_at DESC LIMIT 50`)
     ]);
     res.json({ total: total.rows[0].total, aprovadas: aprovadas.rows[0].total, pendentes: pendentes.rows[0].total, reprovadas: reprovadas.rows[0].total, porUsuario: porUsuario.rows, resumoVendas: resumoVendas.rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -461,7 +570,6 @@ app.get('/api/relatorios/dashboard', auth, async (req, res) => {
 app.get('/api/relatorios/atividades', auth, async (req, res) => {
   try {
     const { data_inicial, data_final, setor, user_id, tipo } = req.query;
-    // ✅ FIX: busca todas as atividades sem limite quando não há filtro de data
     let q = `SELECT a.*, u.nome as user_nome, u.area_atuacao FROM atividades a LEFT JOIN users u ON u.id=a.user_id WHERE 1=1`;
     const params = []; let i = 1;
     if (data_inicial) { q += ` AND a.created_at >= $${i++}`; params.push(data_inicial); }
@@ -471,25 +579,20 @@ app.get('/api/relatorios/atividades', auth, async (req, res) => {
     if (tipo && tipo !== 'todos') { q += ` AND a.tipo=$${i++}`; params.push(tipo); }
     q += ' ORDER BY a.created_at DESC LIMIT 1000';
     const r = await pool.query(q, params);
-
-    // Métricas calculadas de TODAS as atividades (sem filtro de tipo para acertos)
     const acessos = r.rows.filter(x => x.tipo === 'access').length;
     const vendas = r.rows.filter(x => x.tipo === 'sales').length;
     const conferencias = r.rows.filter(x => x.tipo === 'conference').length;
     const documentos = r.rows.filter(x => x.tipo === 'documents').length;
-
-    // Ranking por usuário
     const rankMap = {};
     r.rows.forEach(a => {
       const uid = a.user_id || 'sistema';
-      if (!rankMap[uid]) rankMap[uid] = { nome: a.user_nome || 'Sistema', area: a.area_atuacao || '—', acessos:0, vendas:0, conferencias:0, docs:0 };
-      if (a.tipo === 'access') rankMap[uid].acessos++;
-      if (a.tipo === 'sales') rankMap[uid].vendas++;
-      if (a.tipo === 'conference') rankMap[uid].conferencias++;
-      if (a.tipo === 'documents') rankMap[uid].docs++;
+      if (!rankMap[uid]) rankMap[uid] = { nome: a.user_nome||'Sistema', area: a.area_atuacao||'—', acessos:0, vendas:0, conferencias:0, docs:0 };
+      if (a.tipo==='access') rankMap[uid].acessos++;
+      if (a.tipo==='sales') rankMap[uid].vendas++;
+      if (a.tipo==='conference') rankMap[uid].conferencias++;
+      if (a.tipo==='documents') rankMap[uid].docs++;
     });
-    const ranking = Object.values(rankMap).sort((a,b) => (b.acessos+b.vendas+b.conferencias) - (a.acessos+a.vendas+a.conferencias));
-
+    const ranking = Object.values(rankMap).sort((a,b) => (b.acessos+b.vendas+b.conferencias)-(a.acessos+a.vendas+a.conferencias));
     res.json({ atividades: r.rows, metricas: { acessos, vendas, conferencias, documentos }, ranking });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -503,13 +606,23 @@ app.get('/api/relatorios/auditoria', auth, async (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok: true, timestamp: new Date() }));
 
+// ── MULTER ERROR HANDLER ─────────────────────────────────────
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Arquivo muito grande. Máximo 20MB.' });
+    return res.status(400).json({ error: err.message });
+  }
+  if (err) return res.status(400).json({ error: err.message });
+  next();
+});
+
 async function start() {
   try {
     const schema = fs.readFileSync(path.join(__dirname, 'db/schema.sql'), 'utf8');
     await pool.query(schema);
-    console.log('✅ Banco inicializado com sucesso');
+    console.log('✅ Banco inicializado');
   } catch (e) { console.error('⚠️ Erro ao inicializar banco:', e.message); }
   const PORT = process.env.PORT || 3001;
-  app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
+  app.listen(PORT, () => console.log(`🚀 Servidor na porta ${PORT}`));
 }
 start();

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { api, fmtCurrency, fmtDate, statusBadge, STATUS_LIST } from '../api';
+import { api, fmtCurrency, fmtDate, statusBadge, STATUS_LIST, abrirArquivo } from '../api';
 
 const STATUS_OPTS = ['todos', ...STATUS_LIST];
 
@@ -209,8 +209,8 @@ export default function DocumentosVendas() {
                     <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.07em',marginBottom:8}}>Documentos</div>
                     {detalhe.documentos?.length === 0 && <p style={{fontSize:12,color:'var(--text3)'}}>Nenhum doc enviado.</p>}
                     {detalhe.documentos?.map(doc => (
-                      <a key={doc.id} href={`/uploads/${doc.arquivo_path}`} target="_blank" rel="noopener noreferrer"
-                        style={{display:'block',padding:'5px 0',fontSize:12,color:'var(--accent)'}}>
+                      <a key={doc.id} onClick={() => abrirArquivo(doc.arquivo_path)}
+                        style={{display:'block',padding:'5px 0',fontSize:12,color:'var(--accent)',cursor:'pointer',background:'none',border:'none'}}>
                         📄 {doc.tipo.replace(/_/g,' ')}
                       </a>
                     ))}

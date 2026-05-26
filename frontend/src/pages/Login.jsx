@@ -127,7 +127,7 @@ export default function Login() {
                 />
               </label>
               <label>Senha *
-                <input type="password" value={reg.senha} onChange={e => r('senha', e.target.value)} placeholder="Minimo 6 caracteres" required minLength={6} />
+                <input type="password" value={reg.senha} onChange={e => r('senha', e.target.value)} placeholder="Min 8 chars, 1 maiúscula, 1 número" required minLength={8} />
               </label>
               {error && <div className="error-message">⚠ {error}</div>}
               {success && <div style={{ color:'var(--green)', fontSize:13, marginTop:8 }}>✓ {success}</div>}
